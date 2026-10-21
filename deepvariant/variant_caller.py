@@ -333,7 +333,13 @@ class VariantCaller(metaclass=abc.ABCMeta):
             n_ref, n_total, is_haploid
         )
         quantized_gq = _quantize_gq(raw_gq, self.options.gq_resolution)
-        has_valid_gl = np.amax(likelihoods) == likelihoods[0]
+        # reference_confidence always returns three likelihoods, including for
+        # haploid sites. Avoid a NumPy reduction at every reference position;
+        # these comparisons also preserve ties and NaN rejection.
+        has_valid_gl = (
+            likelihoods[0] >= likelihoods[1]
+            and likelihoods[0] >= likelihoods[2]
+        )
       return _GVCF(
           summary_counts=summary_counts,
           quantized_gq=quantized_gq,

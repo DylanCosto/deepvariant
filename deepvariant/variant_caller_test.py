@@ -303,6 +303,27 @@ class VariantCallerTests(parameterized.TestCase):
     allele_counter = self.fake_allele_counter(100, [(0, 0, ref)])
     self.assertEmpty(list(caller.make_gvcfs(allele_counter.summary_counts())))
 
+  @parameterized.parameters(
+      ([0.0, -1.0, -2.0], [0, 0]),
+      ([0.0, 0.0, 0.0], [0, 0]),
+      ([-1.0, 0.0, -2.0], [-1, -1]),
+      ([-1.0, -2.0, 0.0], [-1, -1]),
+      ([np.nan, 0.0, 0.0], [-1, -1]),
+      ([0.0, np.nan, 0.0], [-1, -1]),
+      ([0.0, 0.0, np.nan], [-1, -1]),
+      ([np.inf, 0.0, 0.0], [0, 0]),
+      ([-np.inf, -np.inf, -np.inf], [0, 0]),
+  )
+  def test_gvcf_reference_likelihood_comparison(self, likelihoods, genotype):
+    caller = PlaceholderVariantCaller(0.01, 100)
+    allele_counter = self.fake_allele_counter(100, [(0, 10, 'A')])
+    with mock.patch.object(
+        caller, 'reference_confidence', return_value=(50, np.array(likelihoods))
+    ):
+      records = list(caller.make_gvcfs(allele_counter.summary_counts()))
+    self.assertLen(records, 1)
+    self.assertEqual(list(records[0].calls[0].genotype), genotype)
+
   @parameterized.parameters('X', '>', '!')
   def test_gvcf_basic_raises_with_bad_ref_base(self, ref):
     caller = PlaceholderVariantCaller(0.01, 100)
