@@ -1270,6 +1270,24 @@ class DefaultOptionsTest(parameterized.TestCase):
         options.pic_options.read_requirements.keep_secondary_alignments, True
     )
 
+  @parameterized.parameters(None, -1, 0, 9)
+  @flagsaver.flagsaver
+  def test_examples_compression_level(self, level):
+    FLAGS.examples_compression_level = level
+    FLAGS.ref = testdata.CHR20_FASTA
+    FLAGS.reads = testdata.CHR20_BAM
+    FLAGS.truth_variants = testdata.TRUTH_VARIANTS_VCF
+    FLAGS.confident_regions = testdata.CONFIDENT_REGIONS_BED
+    FLAGS.mode = 'training'
+    FLAGS.examples = 'out.tfrecord'
+    FLAGS.channel_list = ','.join(dv_constants.PILEUP_DEFAULT_CHANNELS)
+    options = make_examples.default_options(add_flags=True)
+    # Unset leaves the per-mode default to make_examples_native.
+    self.assertEqual(
+        options.HasField('examples_compression_level'), level is not None
+    )
+    self.assertEqual(options.examples_compression_level, level or 0)
+
   @flagsaver.flagsaver
   def test_min_base_quality(self):
     FLAGS.min_base_quality = 5

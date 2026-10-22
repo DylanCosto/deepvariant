@@ -314,6 +314,11 @@ class ExamplesGeneratorPeer {
 std::string GetExamplesFilename(const MakeExamplesOptions& options,
                                 const Sample& sample, bool add_suffix = false);
 
+// Returns the gzip compression level for output examples. Unless overridden,
+// calling examples, which are temporary inputs to call_variants, use fast
+// compression and other modes use the zlib default.
+int ExamplesCompressionLevel(const MakeExamplesOptions& options);
+
 }  // namespace deepvariant
 }  // namespace genomics
 }  // namespace learning

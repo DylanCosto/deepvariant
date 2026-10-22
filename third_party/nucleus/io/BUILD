@@ -1334,6 +1334,7 @@ cc_test(
     srcs = ["example_writer_test.cc"],
     deps = [
         ":example_writer",
+        ":tfrecord_reader",
         "@com_google_googletest//:gtest_main",
     ],
 )

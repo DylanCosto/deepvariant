@@ -50,8 +50,10 @@ enum class ExampleFormat {
 // Local writer for records, supports only a single file.
 class ExampleWriter {
  public:
+  // compression_level is -1 for the gzip default, or 0 through 9.
   explicit ExampleWriter(absl::string_view path,
-                         ExampleFormat format = ExampleFormat::kAuto);
+                         ExampleFormat format = ExampleFormat::kAuto,
+                         int compression_level = -1);
   ~ExampleWriter();
   bool Add(absl::string_view value,
            absl::string_view chrom = {},

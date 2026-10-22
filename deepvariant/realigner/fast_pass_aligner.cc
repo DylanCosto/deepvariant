@@ -38,6 +38,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "deepvariant/protos/realigner.pb.h"
@@ -344,7 +345,7 @@ CigarUnit::Operation CigarOperationFromChar(char op) {
 std::list<CigarOp> CigarStringToVector(absl::string_view cigar) {
   std::list<CigarOp> cigarOps;
   absl::string_view input(cigar);
-  RE2 pattern("(\\d+)([XIDS=])");
+  static const RE2 pattern("(\\d+)([XIDS=])");
   int opLen;
   string opType;
   while (RE2::Consume(&input, pattern, &opLen, &opType)) {
@@ -511,6 +512,7 @@ void FastPassAligner::RealignReadsToReference(
     absl::Span<const nucleus::genomics::v1::Read> reads,
     std::unique_ptr<std::vector<nucleus::genomics::v1::Read>>*
         realigned_reads) {
+  (*realigned_reads)->reserve((*realigned_reads)->size() + reads.size());
   // Loop through all reads
   for (size_t read_index = 0; read_index < reads.size(); read_index++) {
     const nucleus::genomics::v1::Read& read = reads[read_index];
@@ -577,7 +579,7 @@ void FastPassAligner::RealignReadsToReference(
         realigned_read.set_allocated_alignment(new_alignment.release());
       } else if (force_alignment_) {
       }
-      (*realigned_reads)->push_back(realigned_read);
+      (*realigned_reads)->push_back(std::move(realigned_read));
     } else {  // Could not find a new alignment.
       if (force_alignment_) {
         // Adding an empty read to the realigned_reads array to keep the indices
@@ -585,7 +587,7 @@ void FastPassAligner::RealignReadsToReference(
         (*realigned_reads)->push_back(nucleus::genomics::v1::Read());
       } else {
         // Keeping original alignment (force_alignment is off).
-        (*realigned_reads)->push_back(realigned_read);
+        (*realigned_reads)->push_back(std::move(realigned_read));
       }
     }
   }  // for
@@ -620,7 +622,7 @@ void SetPositionsMap(size_t haplotype_size,
   std::vector<int>& positions_map =
       hyplotype_alignment->hap_to_ref_positions_map;
   positions_map.resize(haplotype_size);
-  RE2 pattern("(\\d+)([XIDS=])");  // matches cigar operation
+  static const RE2 pattern("(\\d+)([XIDS=])");  // matches cigar operation
   absl::string_view input(hyplotype_alignment->cigar);
   int cur_shift = 0;
   int haplotype_pos = 0;

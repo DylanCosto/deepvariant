@@ -31,7 +31,9 @@
 #include "third_party/nucleus/io/example_writer.h"
 #include <filesystem>
 #include <string>
+#include <vector>
 
+#include "third_party/nucleus/io/tfrecord_reader.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace nucleus {
@@ -62,6 +64,40 @@ TEST(ExampleWriterTest, TFWriterTest) {
   auto output_record = std::string("test_output");
   ExampleWriter writer = ExampleWriter("/tmp/out.tfrecord.gz");
   EXPECT_TRUE(writer.Add(output_record));
+}
+
+TEST(ExampleWriterTest, InvalidCompressionLevel) {
+  for (int level : {-2, 10, 128}) {
+    ExampleWriter writer(
+        ::testing::TempDir() + "invalid-compression.tfrecord.gz",
+        ExampleFormat::kAuto, level);
+    EXPECT_FALSE(writer.status().ok());
+    EXPECT_FALSE(writer.Add("record"));
+  }
+}
+
+TEST(ExampleWriterTest, CompressionLevelsPreserveRecords) {
+  const std::vector<std::string> records = {"", std::string(4096, 'A'),
+                                            std::string("binary\0record", 13),
+                                            std::string(65536, 'G')};
+  for (int level : {-1, 0, 1, 6, 9}) {
+    SCOPED_TRACE(level);
+    const std::string path = ::testing::TempDir() + "example-writer-level-" +
+                             std::to_string(level) + ".tfrecord.gz";
+    ExampleWriter writer(path, ExampleFormat::kAuto, level);
+    ASSERT_TRUE(writer.status().ok());
+    for (const auto& record : records) {
+      ASSERT_TRUE(writer.Add(record));
+    }
+    ASSERT_TRUE(writer.Close());
+    auto reader = TFRecordReader::New(path, "GZIP");
+    ASSERT_NE(reader, nullptr);
+    for (const auto& record : records) {
+      ASSERT_TRUE(reader->GetNext());
+      EXPECT_EQ(reader->record(), record);
+    }
+    EXPECT_FALSE(reader->GetNext());
+  }
 }
 
 }  // namespace nucleus
