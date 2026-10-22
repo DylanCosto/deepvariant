@@ -516,8 +516,6 @@ void FastPassAligner::RealignReadsToReference(
   // Loop through all reads
   for (size_t read_index = 0; read_index < reads.size(); read_index++) {
     const nucleus::genomics::v1::Read& read = reads[read_index];
-    nucleus::genomics::v1::Read realigned_read;
-    realigned_read.MergeFrom(read);
     int best_hap_index = -1;
     // See if we have a better alignment
     if (GetBestReadAlignment(read_index, &best_hap_index)) {
@@ -575,19 +573,19 @@ void FastPassAligner::RealignReadsToReference(
         cu->set_operation_length(op.length);
       }
 
+      nucleus::genomics::v1::Read& realigned_read =
+          (*realigned_reads)->emplace_back(read);
       if (!readToRefCigarOps.empty()) {
         realigned_read.set_allocated_alignment(new_alignment.release());
-      } else if (force_alignment_) {
       }
-      (*realigned_reads)->push_back(std::move(realigned_read));
     } else {  // Could not find a new alignment.
       if (force_alignment_) {
         // Adding an empty read to the realigned_reads array to keep the indices
         // consistent.
-        (*realigned_reads)->push_back(nucleus::genomics::v1::Read());
+        (*realigned_reads)->emplace_back();
       } else {
         // Keeping original alignment (force_alignment is off).
-        (*realigned_reads)->push_back(std::move(realigned_read));
+        (*realigned_reads)->push_back(read);
       }
     }
   }  // for

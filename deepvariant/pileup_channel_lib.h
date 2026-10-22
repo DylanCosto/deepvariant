@@ -172,13 +172,15 @@ class Channels {
 
   std::vector<int> channel_enum_to_index_;
 
-  bool CalculateChannels(
-      std::vector<std::vector<unsigned char>>& data,
-      absl::Span<const DeepVariantChannelEnum> channel_enums,
-      const nucleus::genomics::v1::Read& read, absl::string_view ref_bases,
-      const DeepVariantCall& dv_call,
-      const std::vector<std::string>& alt_alleles, int image_start_pos,
-      absl::flat_hash_set<DeepVariantChannelEnum> channels_enum_to_blank = {});
+  bool CalculateChannels(std::vector<std::vector<unsigned char>>& data,
+                         absl::Span<const DeepVariantChannelEnum> channel_enums,
+                         const nucleus::genomics::v1::Read& read,
+                         absl::string_view ref_bases,
+                         const DeepVariantCall& dv_call,
+                         const std::vector<std::string>& alt_alleles,
+                         int image_start_pos,
+                         const absl::flat_hash_set<DeepVariantChannelEnum>&
+                             channels_enum_to_blank = {});
 
   // Calculate values for channels that only depend on information at the
   // granularity of an entire read.

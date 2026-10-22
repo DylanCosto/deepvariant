@@ -255,6 +255,37 @@ int AlleleIndex(absl::Span<const AlleleCount> allele_counts, int64_t pos) {
   return std::distance(allele_counts.begin(), idx);
 }
 
+namespace {
+
+// Returns true if a methylation level in [0, 255] is above the threshold for
+// methylation calling.
+bool MethylationLevelExceedsThreshold(int32_t methylation_level,
+                                      double methylation_calling_threshold) {
+  float methyl_prob = static_cast<float>(methylation_level) / 255.0;
+  if (methyl_prob < 0.0) return false;
+
+  return methyl_prob > methylation_calling_threshold;
+}
+
+// Returns the read's 5mC modification levels, or nullptr if it has none.
+const std::string* Get5mCLevels(const Read& read) {
+  if (read.base_modifications().empty()) {
+    return nullptr;
+  }
+  auto it = read.base_modifications().find(nucleus::k5mC);
+  return it == read.base_modifications().end() ? nullptr : &it->second;
+}
+
+// Equivalent to GetMethylationLevel() given the levels from Get5mCLevels().
+int32_t GetMethylationLevel(const std::string* levels, int offset) {
+  if (levels == nullptr || offset < 0 || offset >= levels->size()) {
+    return 0;
+  }
+  return static_cast<int32_t>(static_cast<unsigned char>((*levels)[offset]));
+}
+
+}  // namespace
+
 // Returns true if the methylation probability at the given offset is above the
 // threshold for methylation calling.
 bool IsMethylated(const Read& read, int offset,
@@ -266,11 +297,8 @@ bool IsMethylated(const Read& read, int offset,
   return false;
   }
 
-  float methyl_prob =
-      static_cast<float>(GetMethylationLevel(read, offset)) / 255.0;
-  if (methyl_prob < 0.0) return false;
-
-  return methyl_prob > methylation_calling_threshold;
+  return MethylationLevelExceedsThreshold(GetMethylationLevel(read, offset),
+                                          methylation_calling_threshold);
 }
 
 // Returns the methylation level [0, 255] at the given offset for 5mC.
@@ -470,6 +498,10 @@ ReadAllele AlleleCounter::MakeIndelReadAllele(const Read& read,
 
 void AlleleCounter::AddReadAlleles(const Read& read, absl::string_view sample,
                                    absl::Span<const ReadAllele> to_add) {
+  // The read and sample keys are built on first use and shared by all of the
+  // read's alleles.
+  string key;
+  string sample_key;
   for (size_t i = 0; i < to_add.size(); ++i) {
     const ReadAllele& to_add_i = to_add[i];
 
@@ -512,18 +544,16 @@ void AlleleCounter::AddReadAlleles(const Read& read, absl::string_view sample,
                         candidate_positions_.end(), to_add_i.position()))) {
       auto* read_alleles = allele_count.mutable_read_alleles();
       auto* sample_alleles = allele_count.mutable_sample_alleles();
-      const string key = ReadKey(read);
-      const Allele allele = MakeAllele(
-          to_add_i.bases(), to_add_i.type(), 1, to_add_i.is_low_quality(),
-          to_add_i.mapping_quality(), to_add_i.avg_base_quality(),
-          to_add_i.is_reverse_strand(), to_add_i.is_methylated(),
-          to_add_i.methylation_level());
-
+      if (key.empty()) {
+        key = ReadKey(read);
+        sample_key = std::string(sample);
+      }
+      Allele& allele = (*read_alleles)[key];
       // Naively, there should never be multiple counts for the same read key.
       // We detect such a situation here but only write out a warning. It would
       // be better to have a stronger response (FATAL), but unfortunately we see
       // data in the wild that we need to process that has duplicates.
-      if (read_alleles->count(key)) {
+      if (allele.count() != 0) {
         // Not thread safe.
         static int counter = 0;
         if (counter++ < 1) {
@@ -531,12 +561,15 @@ void AlleleCounter::AddReadAlleles(const Read& read, absl::string_view sample,
                   << allele_count.position().ShortDebugString();
         }
       }
+      allele =
+          MakeAllele(to_add_i.bases(), to_add_i.type(), 1,
+                     to_add_i.is_low_quality(), to_add_i.mapping_quality(),
+                     to_add_i.avg_base_quality(), to_add_i.is_reverse_strand(),
+                     to_add_i.is_methylated(), to_add_i.methylation_level());
 
-      (*read_alleles)[key] = allele;
       // Update sample to allele map. This may allows us to determine set of
       // samples that support each allele.
-      Allele* new_allele = (*sample_alleles)[std::string(sample)].add_alleles();
-      *new_allele = allele;
+      *(*sample_alleles)[sample_key].add_alleles() = allele;
     }
   }
 }
@@ -889,14 +922,19 @@ void AlleleCounter::Add(const nucleus::genomics::v1::Read& read,
   int interval_offset =
       aln.position().position() + read_shift - Interval().start();
   const string_view read_seq(read.aligned_sequence());
-  std::vector<CigarUnit> cigar;
-  if (cigar_to_use != nullptr) {
-    cigar.assign(cigar_to_use->begin(), cigar_to_use->end());
-  } else {
-    cigar.assign(aln.cigar().begin(), aln.cigar().end());
-  }
+  // Per-read values used for every aligned base. Methylation levels are
+  // recorded for each base allele; whether it is methylated is only evaluated
+  // when methylation calling or methylation-aware phasing is enabled.
+  const std::string* const methylation_levels = Get5mCLevels(read);
+  const bool check_methylation = !read.base_modifications().empty() &&
+                                 (options_.enable_methylation_calling() ||
+                                  options_.enable_methylation_aware_phasing());
+  const double methylation_calling_threshold =
+      options_.methylation_calling_threshold();
+  const int mapping_quality = read.alignment().mapping_quality();
+  const bool is_reverse_strand = read.alignment().position().reverse_strand();
 
-  for (const auto& cigar_elt : cigar) {
+  const auto add_cigar_element = [&](const CigarUnit& cigar_elt) {
     const int op_len = cigar_elt.operation_length();
     switch (cigar_elt.operation()) {
       case CigarUnit::ALIGNMENT_MATCH:
@@ -906,20 +944,12 @@ void AlleleCounter::Add(const nucleus::genomics::v1::Read& read,
           const int ref_offset = ref_interval_offset + i;
           const int base_offset = read_offset + i;
           bool is_low_quality_read_allele = false;
-          double methylation_calling_threshold =
-              options_.methylation_calling_threshold();
-          bool is_methylated = false;
-          int32_t methylation_level = GetMethylationLevel(read, base_offset);
-          // Store methylation probability for each read allele.
-          // Only run when methylation-calling is enabled or methylation-aware
-          // phasing is enabled.
-          if (IsMethylated(
-                  read, base_offset,
-                  options_.enable_methylation_calling() ||
-                      options_.enable_methylation_aware_phasing(),
-                  methylation_calling_threshold)) {
-            is_methylated = true;
-          }
+          const int32_t methylation_level =
+              GetMethylationLevel(methylation_levels, base_offset);
+          const bool is_methylated =
+              check_methylation &&
+              MethylationLevelExceedsThreshold(methylation_level,
+                                               methylation_calling_threshold);
           if (IsValidRefOffset(ref_offset) &&
               CanBasesBeUsed(read, base_offset, 1, options_,
                              is_low_quality_read_allele)) {
@@ -928,12 +958,10 @@ void AlleleCounter::Add(const nucleus::genomics::v1::Read& read,
                     ? AlleleType::REFERENCE
                     : AlleleType::SUBSTITUTION;
             to_add.emplace_back(
-                interval_offset + i, string(read_seq.substr(base_offset, 1)),
-                type, is_low_quality_read_allele,
-                read.alignment().mapping_quality(),
-                read.aligned_quality()[base_offset],
-                read.alignment().position().reverse_strand(), is_methylated,
-                methylation_level);
+                interval_offset + i, read_seq.substr(base_offset, 1), type,
+                is_low_quality_read_allele, mapping_quality,
+                read.aligned_quality()[base_offset], is_reverse_strand,
+                is_methylated, methylation_level);
           }
         }
         read_offset += op_len;
@@ -972,6 +1000,12 @@ void AlleleCounter::Add(const nucleus::genomics::v1::Read& read,
         // OPERATION_UNSPECIFIED.
         break;
     }
+  };
+  // Read the CIGAR in place rather than copying its elements.
+  if (cigar_to_use != nullptr) {
+    for (const auto& cigar_elt : *cigar_to_use) add_cigar_element(cigar_elt);
+  } else {
+    for (const auto& cigar_elt : aln.cigar()) add_cigar_element(cigar_elt);
   }
 
   AddReadAlleles(read, sample, to_add);

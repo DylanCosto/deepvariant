@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "deepvariant/protos/deepvariant.pb.h"
@@ -309,7 +310,7 @@ std::vector<Read> RealignReadsToHaplotype(
   realigner.set_ref_prefix_len(ref_start - ref_start_ext);
   realigner.set_ref_suffix_len(ref_end_ext - ref_end);
   realigner.set_haplotypes({absl::StrCat(ref_prefix, haplotype, ref_suffix)});
-  return *realigner.AlignReads(reads);
+  return std::move(*realigner.AlignReads(reads));
 }
 
 }  // namespace deepvariant

@@ -617,7 +617,7 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
   // With only the target sample, the combined counts are identical.
   const std::vector<Allele>& all_sample_alleles =
       multiple_samples ? combined_sample_alleles : target_sample_alleles;
-  const std::vector<Allele> non_target_sample_alleles =
+  std::vector<Allele> non_target_sample_alleles =
       SumAlleleCounts(non_target_allele_counts);
 
   const int target_samples_total_count =
@@ -655,10 +655,10 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
         });
   } else {
     return {
-      .alt_alleles = target_sample_alt_alleles,
+      .alt_alleles = std::move(target_sample_alt_alleles),
       .complex_variant_created = false,
       .ref_bases = "",
-      .non_target_sample_alleles = non_target_sample_alleles,
+      .non_target_sample_alleles = std::move(non_target_sample_alleles),
       .non_target_allele_counts = std::move(non_target_allele_counts),
       .rejected_alleles = std::move(rejected_alleles),
     };
