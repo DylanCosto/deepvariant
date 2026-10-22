@@ -148,6 +148,25 @@ def _filter_by_haplotype(
   return [r for r in read_infos if read_phases.get(r.read_name, 0) == haplotype]
 
 
+def _read_support_means(
+    read_infos: Sequence[deepvariant_pb2.DeepVariantCall.ReadSupport],
+) -> tuple[int, int, int]:
+  """Computes quality and strand summaries in one pass over the read protos."""
+  if not read_infos:
+    return 0, 0, 0
+  mapping_quality = base_quality = reverse_count = 0
+  for read in read_infos:
+    mapping_quality += read.mapping_quality
+    base_quality += read.average_base_quality
+    reverse_count += read.is_reverse_strand
+  count = len(read_infos)
+  return (
+      mapping_quality // count,
+      base_quality // count,
+      100 * reverse_count // count,
+  )
+
+
 def _filter_by_sample(
     read_infos: Sequence[deepvariant_pb2.DeepVariantCall.ReadSupport],
     sample_name: str,
@@ -230,15 +249,9 @@ class FeatureEncoder:
     self.alt_read_infos = _get_alt_read_infos(
         candidate, self.alt_allele_indices
     )
-    self.all_alt_read_infos = _get_alt_read_infos(
-        candidate, tuple(range(len(candidate.variant.alternate_bases)))
-    )
     if sample:
       self.ref_read_infos = _filter_by_sample(self.ref_read_infos, sample)
       self.alt_read_infos = _filter_by_sample(self.alt_read_infos, sample)
-      self.all_alt_read_infos = _filter_by_sample(
-          self.all_alt_read_infos, sample
-      )
     if haplotype is not None and read_phases is not None:
       self.ref_read_infos = _filter_by_haplotype(
           self.ref_read_infos, read_phases, haplotype
@@ -246,12 +259,8 @@ class FeatureEncoder:
       self.alt_read_infos = _filter_by_haplotype(
           self.alt_read_infos, read_phases, haplotype
       )
-      self.all_alt_read_infos = _filter_by_haplotype(
-          self.all_alt_read_infos, read_phases, haplotype
-      )
     self.ref_read_infos_count = len(self.ref_read_infos)
     self.alt_read_infos_count = len(self.alt_read_infos)
-    self.all_alt_read_infos_count = len(self.all_alt_read_infos)
     self.exclude_alleles = get_exclude_alleles(candidate, alt_allele_indices)
 
   def _get_contig(self) -> str:
@@ -429,6 +438,33 @@ class FeatureEncoder:
       return self._get_alt_reverse_strand_ratio()
     else:
       raise ValueError(f'{feature.value} does not map to a callable.')
+
+  def encode_base_features(self) -> dict[str, int]:
+    """Encodes base features in BaseFeature order, sharing read summaries."""
+    ref_mq, ref_bq, ref_reverse = _read_support_means(self.ref_read_infos)
+    alt_mq, alt_bq, alt_reverse = _read_support_means(self.alt_read_infos)
+    depth = self._get_alt_indices_depth()
+    # Total depth intentionally includes every sample/haplotype, matching the
+    # individual feature accessors even for a filtered encoder.
+    total_depth = self._get_total_depth()
+    return {
+        BaseFeature.NUM_READS_SUPPORTS_REF.value: self.ref_read_infos_count,
+        BaseFeature.NUM_READS_SUPPORTS_ALT.value: self.alt_read_infos_count,
+        BaseFeature.ALT_INDICES_DEPTH.value: depth,
+        BaseFeature.TOTAL_DEPTH.value: total_depth,
+        BaseFeature.VARIANT_ALLELE_FREQUENCY.value: (
+            100 * self.alt_read_infos_count // total_depth if total_depth else 0
+        ),
+        BaseFeature.ALT_INDICES_VARIANT_ALLELE_FREQUENCY.value: (
+            100 * self.alt_read_infos_count // depth if depth else 0
+        ),
+        BaseFeature.REF_MAPPING_QUALITY.value: ref_mq,
+        BaseFeature.ALT_MAPPING_QUALITY.value: alt_mq,
+        BaseFeature.REF_BASE_QUALITY.value: ref_bq,
+        BaseFeature.ALT_BASE_QUALITY.value: alt_bq,
+        BaseFeature.REF_REVERSE_STRAND_RATIO.value: ref_reverse,
+        BaseFeature.ALT_REVERSE_STRAND_RATIO.value: alt_reverse,
+    }
 
   def encode_variant_feature(
       self,
@@ -636,10 +672,7 @@ class SmallModelExampleFactory:
     """Encodes all model features for a given candidate into a key-value dict."""
     candidate_example = {}
     feature_encoder = FeatureEncoder(candidate, alt_allele_indices, sample=None)
-    candidate_example.update({
-        feature.value: feature_encoder.encode_base_feature(feature)
-        for feature in BaseFeature
-    })
+    candidate_example.update(feature_encoder.encode_base_features())
     if len(self.sample_names) > 1:
       for sample_index in sample_order:
         sample_name = self.sample_names[sample_index]
@@ -647,10 +680,10 @@ class SmallModelExampleFactory:
             candidate, alt_allele_indices, sample_name
         )
         candidate_example.update({
-            f'{sample_name}_{feature.value}': (
-                sample_feature_encoder.encode_base_feature(feature)
+            f'{sample_name}_{name}': value
+            for name, value in (
+                sample_feature_encoder.encode_base_features().items()
             )
-            for feature in BaseFeature
         })
     candidate_example.update({
         feature.value: feature_encoder.encode_variant_feature(feature)
@@ -672,12 +705,12 @@ class SmallModelExampleFactory:
               haplotype.value,
               read_phases,
           )
-          for feature in BaseFeature:
-            candidate_example.update({
-                f'{sample_name}_{feature.value}_hp_{haplotype.value}': (
-                    haplotype_feature_encoder.encode_base_feature(feature)
-                )
-            })
+          candidate_example.update({
+              f'{sample_name}_{name}_hp_{haplotype.value}': value
+              for name, value in (
+                  haplotype_feature_encoder.encode_base_features().items()
+              )
+          })
     return candidate_example
 
   def _encode_model_features(
@@ -701,10 +734,13 @@ class SmallModelExampleFactory:
     encoded_candidate = self._encode_candidate_feature_dict(
         candidate, alt_allele_indices, read_phases, sample_order
     )
+    # Preserve the encoder's feature order while avoiding a linear search for
+    # every feature. model_features can select a subset of the encoded fields.
+    selected_features = set(self.model_features)
     return [
         value
         for feature, value in encoded_candidate.items()
-        if feature in self.model_features
+        if feature in selected_features
     ]
 
   def _encode_training_example(

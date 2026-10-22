@@ -72,12 +72,13 @@ RUN ./run-prereq.sh
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 0 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 0
 
-# Create shell wrappers for python zip files for easier use.
+# Create shell wrappers for python zip files for easier use. As in Dockerfile,
+# make_examples preloads jemalloc for its allocation-heavy work.
 RUN \
   BASH_HEADER='#!/bin/bash' && \
   printf "%s\n%s\n" \
     "${BASH_HEADER}" \
-    'python3 -u /opt/deepvariant/bin/make_examples_pangenome_aware_dv.zip "$@"' > \
+    'LD_PRELOAD=libjemalloc.so.2 python3 -u /opt/deepvariant/bin/make_examples_pangenome_aware_dv.zip "$@"' > \
     /opt/deepvariant/bin/make_examples_pangenome_aware_dv && \
   printf "%s\n%s\n" \
     "${BASH_HEADER}" \
@@ -140,7 +141,7 @@ ENV PATH="${PATH}":/opt/conda/bin:/opt/conda/envs/bio/bin:/opt/deepvariant/bin/p
 ENV TF_USE_LEGACY_KERAS=1
 
 RUN apt-get -y update && \
-  apt-get install -y parallel python3-pip && \
+  apt-get install -y parallel python3-pip libjemalloc2 && \
   PATH="${HOME}/.local/bin:$PATH" python3 -m pip install absl-py==0.13.0 && \
   apt-get clean autoclean && \
   apt-get autoremove -y --purge && \

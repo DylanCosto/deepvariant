@@ -616,6 +616,26 @@ INSTANTIATE_TEST_SUITE_P(
          .expected_haplotype = "AGTGGGGGGGGTGGGGGTG"},
     })));
 
+TEST(ExamplesCompressionLevel, DefaultsByMode) {
+  MakeExamplesOptions options;
+  options.set_mode(MakeExamplesOptions::CALLING);
+  EXPECT_EQ(ExamplesCompressionLevel(options), 1);
+  options.set_mode(MakeExamplesOptions::TRAINING);
+  EXPECT_EQ(ExamplesCompressionLevel(options), -1);
+}
+
+TEST(ExamplesCompressionLevel, ExplicitLevelOverridesMode) {
+  MakeExamplesOptions options;
+  for (const auto mode :
+       {MakeExamplesOptions::CALLING, MakeExamplesOptions::TRAINING}) {
+    options.set_mode(mode);
+    for (int level : {-1, 0, 1, 6, 9}) {
+      options.set_examples_compression_level(level);
+      EXPECT_EQ(ExamplesCompressionLevel(options), level);
+    }
+  }
+}
+
 TEST(GetExamplesFilename, MultiSample) {
   MakeExamplesOptions options;
   options.set_examples_filename("/some/path/to/examples.tfrecord.gz");

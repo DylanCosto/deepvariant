@@ -93,7 +93,7 @@ bool Channels::CalculateChannels(
     absl::Span<const DeepVariantChannelEnum> channel_enums, const Read& read,
     absl::string_view ref_bases, const DeepVariantCall& dv_call,
     const std::vector<std::string>& alt_alleles, int image_start_pos,
-    const absl::flat_hash_set<DeepVariantChannelEnum> channels_enum_to_blank) {
+    const absl::flat_hash_set<DeepVariantChannelEnum>& channels_enum_to_blank) {
   CHECK_EQ(data.size(), channel_enums.size())
       << "Size of provided data vector does not match the number of channels "
          "specified";
@@ -113,6 +113,22 @@ bool Channels::CalculateChannels(
         Channels::ChannelEnumToObject(channel_enum, ref_bases.size(), options_);
   }
 
+  // Resolve the channels and their output rows once per read. The same set is
+  // used for every visible base, so blank-channel lookups need not be repeated
+  // for each pixel. Preserve the configured channel order.
+  struct ActiveChannel {
+    Channel* channel;
+    std::vector<unsigned char>* data;
+  };
+  std::vector<ActiveChannel> active_channels;
+  active_channels.reserve(channel_enums.size());
+  for (const DeepVariantChannelEnum channel_enum : channel_enums) {
+    if (!channels_enum_to_blank.contains(channel_enum)) {
+      active_channels.push_back({channel_objects[channel_enum].get(),
+                                 &data[channel_enum_to_index_[channel_enum]]});
+    }
+  }
+
   /*--------------------------------------
   Calculate channels
   ---------------------------------------*/
@@ -124,7 +140,7 @@ bool Channels::CalculateChannels(
   // have a low quality base at the call position (in which case we
   // should return null) from EncodeRead.
   std::function<bool(int, int, const CigarUnit::Operation&)>
-      action_per_cigar_unit = [&, channel_enums, ref_bases](
+      action_per_cigar_unit = [&, ref_bases](
                                   int ref_i, int read_i,
                                   const CigarUnit::Operation& cigar_op) {
         char read_base = 0;
@@ -150,15 +166,10 @@ bool Channels::CalculateChannels(
           }
           char ref_base = ref_bases[col];
           // Calculate channel values
-          for (const DeepVariantChannelEnum channel_enum : channel_enums) {
-            if (!channels_enum_to_blank.contains(channel_enum)) {
-              CHECK_LT(col, ref_bases.size());
-              CHECK_GE(col, 0);
-              int index = channel_enum_to_index_[channel_enum];
-              channel_objects[channel_enum]->FillReadBase(
-                  data[index], col, read_base, ref_base, base_quality, read,
-                  read_i, dv_call, alt_alleles);
-            }
+          for (const auto& active : active_channels) {
+            active.channel->FillReadBase(*active.data, col, read_base, ref_base,
+                                         base_quality, read, read_i, dv_call,
+                                         alt_alleles);
           }
         }
         return true;

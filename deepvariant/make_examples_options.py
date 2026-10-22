@@ -745,6 +745,16 @@ _DETERMINISTIC_SERIALIZATION = flags.DEFINE_bool(
     'run with SerializeToString(deterministic=True). This is useful for '
     'creating deterministic testdata.',
 )
+_EXAMPLES_COMPRESSION_LEVEL = flags.DEFINE_integer(
+    'examples_compression_level',
+    None,
+    'Gzip compression level, from 0 (none) to 9 (smallest), for output '
+    'examples. -1 selects the zlib default. If unset, calling examples use 1 '
+    '(fast; they are temporary inputs to call_variants) and training '
+    'examples use the zlib default.',
+    lower_bound=-1,
+    upper_bound=9,
+)
 _WRITE_SMALL_MODEL_EXAMPLES = flags.DEFINE_bool(
     'write_small_model_examples',
     False,
@@ -1015,6 +1025,8 @@ def shared_flags_to_options(
   if add_flags:
     if _USE_REJECTED_ALLELES.value:
       options.use_rejected_alleles = _USE_REJECTED_ALLELES.value
+    if _EXAMPLES_COMPRESSION_LEVEL.value is not None:
+      options.examples_compression_level = _EXAMPLES_COMPRESSION_LEVEL.value
 
     options.mode = make_examples_core.parse_proto_enum_flag(
         deepvariant_pb2.MakeExamplesOptions.Mode, _MODE.value.upper()

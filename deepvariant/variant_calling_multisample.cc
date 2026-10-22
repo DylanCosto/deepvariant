@@ -586,45 +586,45 @@ SelectAltAllelesResult
 // IsGoodAltAllele().
 SelectAltAllelesResult VariantCaller::SelectAltAlleles(
     const SelectAltAllelesInputOptions& options) const {
-  SelectAltAllelesResult output_options;
-  // allele_counts_mod is initialized to be the same as allele_counts. If
-  // complex variants are enabled then allele_counts_mod will be modified.
-  for (const auto& [sample_name, allele_count] :
-           options.allele_counts_by_sample) {
-      output_options.allele_counts_mod.insert({sample_name, allele_count});
-  }
-
   // allele_counts.at will throw an exception if key is not found.
   // Absent target_sample is a critical error.
   auto it = options.allele_counts_by_sample.find(target_sample_);
   CHECK(it != options.allele_counts_by_sample.end());
   const AlleleCount& target_sample_allele_count = it->second;
+  const bool multiple_samples = options.allele_counts_by_sample.size() > 1;
   std::vector<AlleleCount> all_samples_allele_counts;
-  all_samples_allele_counts.reserve(options.allele_counts_by_sample.size());
   // "Non-target" samples are referring to all the samples that are providing
   // supportive information. For example, in DeepTrio, they correspond to the
   // parent samples. In DeepSomatic tumor-normal calling, it would refer to the
   // normal sample.
   std::vector<AlleleCount> non_target_allele_counts;
-  non_target_allele_counts.reserve(options.allele_counts_by_sample.size());
-  for (const auto& allele_counts_entry : options.allele_counts_by_sample) {
-    all_samples_allele_counts.push_back(allele_counts_entry.second);
-    if (allele_counts_entry.first != target_sample_) {
-      non_target_allele_counts.push_back(allele_counts_entry.second);
+  if (multiple_samples) {
+    all_samples_allele_counts.reserve(options.allele_counts_by_sample.size());
+    non_target_allele_counts.reserve(options.allele_counts_by_sample.size());
+    for (const auto& allele_counts_entry : options.allele_counts_by_sample) {
+      all_samples_allele_counts.push_back(allele_counts_entry.second);
+      if (allele_counts_entry.first != target_sample_) {
+        non_target_allele_counts.push_back(allele_counts_entry.second);
+      }
     }
   }
 
   const std::vector<Allele> target_sample_alleles =
       SumAlleleCounts(target_sample_allele_count);
-  const std::vector<Allele> all_sample_alleles =
-      SumAlleleCounts(all_samples_allele_counts);
-  const std::vector<Allele> non_target_sample_alleles =
+  const std::vector<Allele> combined_sample_alleles =
+      multiple_samples ? SumAlleleCounts(all_samples_allele_counts)
+                       : std::vector<Allele>{};
+  // With only the target sample, the combined counts are identical.
+  const std::vector<Allele>& all_sample_alleles =
+      multiple_samples ? combined_sample_alleles : target_sample_alleles;
+  std::vector<Allele> non_target_sample_alleles =
       SumAlleleCounts(non_target_allele_counts);
 
   const int target_samples_total_count =
       TotalAlleleCounts(target_sample_allele_count);
   const int all_samples_total_count =
-      TotalAlleleCounts(all_samples_allele_counts);
+      multiple_samples ? TotalAlleleCounts(all_samples_allele_counts)
+                       : target_samples_total_count;
 
   std::vector<Allele> target_sample_alt_alleles;
   std::vector<Allele> rejected_alleles;
@@ -655,10 +655,10 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
         });
   } else {
     return {
-      .alt_alleles = target_sample_alt_alleles,
+      .alt_alleles = std::move(target_sample_alt_alleles),
       .complex_variant_created = false,
       .ref_bases = "",
-      .non_target_sample_alleles = non_target_sample_alleles,
+      .non_target_sample_alleles = std::move(non_target_sample_alleles),
       .non_target_allele_counts = std::move(non_target_allele_counts),
       .rejected_alleles = std::move(rejected_alleles),
     };

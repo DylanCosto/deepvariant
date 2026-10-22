@@ -127,7 +127,7 @@ vector<DeepVariantChannelEnum> PileupImageEncoderNative::AllChannelsEnum(
   std::vector<DeepVariantChannelEnum> channels_list;
 
   // Fill "default" channels from OptChannel set
-  const std::vector<std::string> opt_channels = ToVector(options_.channels());
+  const auto& opt_channels = options_.channels();
   for (int j = 0; j < opt_channels.size(); j++) {
     DeepVariantChannelEnum channel =
         Channels::ChannelStrToEnum(opt_channels[j]);
@@ -300,7 +300,7 @@ PileupImageEncoderNative::BuildPileupForOneSample(
     int image_start_pos, const vector<std::string>& alt_alleles,
     const SampleOptions& sample_options, const float mean_coverage,
     const std::vector<int64_t>* alignment_positions,
-    absl::flat_hash_set<DeepVariantChannelEnum> channels_enum_to_blank) {
+    const absl::flat_hash_set<DeepVariantChannelEnum>& channels_enum_to_blank) {
   // The width of a pileup is defined by the length of ref_bases. ref_bases must
   // have the correct length.
   CHECK(alignment_positions == nullptr || alignment_positions->empty() ||
@@ -316,10 +316,11 @@ PileupImageEncoderNative::BuildPileupForOneSample(
   rows.reserve(pileup_height);
 
   // Reference band at the top of the image.
-  // TODO Calculate the reference band once and reuse it for each
-  // row.
-  for (int i = 0; i < options_.reference_band_height(); i++) {
+  if (options_.reference_band_height() > 0) {
     rows.push_back(EncodeReference(ref_bases));
+    for (int i = 1; i < options_.reference_band_height(); i++) {
+      rows.push_back(std::make_unique<ImageRow>(*rows.front()));
+    }
   }
 
   // Create a downsampled vector of read indices.
@@ -412,16 +413,15 @@ PileupImageEncoderNative::BuildPileupForOneSample(
   // Finally, fill in any missing rows to bring our image to pileup_height rows
   // with empty (all black) pixels.
   int empty_rows = pileup_height - rows.size();
-  int num_channels = AllChannelsEnum("").size();
+  int num_channels = channel_enums_.size();
   if (empty_rows > 0) {
     for (int i = 0; i < empty_rows; i++) {
-      rows.push_back(std::make_unique<ImageRow>(
-          ImageRow(ref_bases.size(), num_channels)));
+      rows.push_back(
+          std::make_unique<ImageRow>(ref_bases.size(), num_channels));
     }
   }
 
   // Add average coverage information after reads are added and sorted.
-  vector<DeepVariantChannelEnum> channels = AllChannelsEnum("");
   auto it = std::find(channel_enums_.begin(), channel_enums_.end(),
                       DeepVariantChannelEnum::CH_MEAN_COVERAGE);
   if (it != channel_enums_.end()) {
@@ -478,10 +478,7 @@ std::unique_ptr<ImageRow> PileupImageEncoderNative::EncodeRead(
     const DeepVariantCall& dv_call, absl::string_view ref_bases,
     const Read& read, int image_start_pos,
     const vector<std::string>& alt_alleles,
-    const absl::flat_hash_set<DeepVariantChannelEnum> channels_enum_to_blank) {
-  int num_channels = AllChannelsEnum("").size();
-  ImageRow img_row(ref_bases.size(), num_channels);
-
+    const absl::flat_hash_set<DeepVariantChannelEnum>& channels_enum_to_blank) {
   const int mapping_quality = read.alignment().mapping_quality();
   const int min_mapping_quality =
       options_.read_requirements().min_mapping_quality();
@@ -491,14 +488,11 @@ std::unique_ptr<ImageRow> PileupImageEncoderNative::EncodeRead(
   }
 
   // Calculate Channels
+  auto img_row =
+      std::make_unique<ImageRow>(ref_bases.size(), channel_enums_.size());
   Channels channel_set{options_};
-  img_row.channel_data =
-      std::vector<std::vector<unsigned char>>(channel_enums_.size());
-  for (int i = 0; i < channel_enums_.size(); ++i) {
-    img_row.channel_data[i] = std::vector<unsigned char>(ref_bases.size(), 0);
-  }
   bool ok = channel_set.CalculateChannels(
-      img_row.channel_data, channel_enums_, read, ref_bases, dv_call,
+      img_row->channel_data, channel_enums_, read, ref_bases, dv_call,
       alt_alleles, image_start_pos, channels_enum_to_blank);
   // Bail out if we found an issue while calculating channels
   // (a low-quality base at the call site, mapping quality is too low, etc)
@@ -506,24 +500,20 @@ std::unique_ptr<ImageRow> PileupImageEncoderNative::EncodeRead(
     return nullptr;
   }
 
-  return std::make_unique<ImageRow>(img_row);
+  return img_row;
 }
 
 std::unique_ptr<ImageRow> PileupImageEncoderNative::EncodeReference(
     const string& ref_bases) {
-  int num_channels = AllChannelsEnum("").size();
-  ImageRow img_row(ref_bases.size(), num_channels);
+  auto img_row =
+      std::make_unique<ImageRow>(ref_bases.size(), channel_enums_.size());
   // Calculate reference rows at the top of each channel image.
   // These are retrieved for each position in the loop below.
   Channels channel_set{options_};
-  img_row.channel_data =
-      std::vector<std::vector<unsigned char>>(channel_enums_.size());
-  for (int i = 0; i < channel_enums_.size(); ++i) {
-    img_row.channel_data[i] = std::vector<unsigned char>(ref_bases.size(), 0);
-  }
-  channel_set.CalculateRefRows(img_row.channel_data, channel_enums_, ref_bases);
+  channel_set.CalculateRefRows(img_row->channel_data, channel_enums_,
+                               ref_bases);
 
-  return std::make_unique<ImageRow>(img_row);
+  return img_row;
 }
 
 }  // namespace deepvariant

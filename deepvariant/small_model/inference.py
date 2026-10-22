@@ -69,7 +69,15 @@ def passes_confidence_threshold(
 def classify(
     classifier: keras.Model, examples: np.ndarray, batch_size: int
 ) -> np.ndarray:
-  return classifier.predict(examples, batch_size=batch_size, verbose=0)
+  # Avoid constructing a prediction epoch and callbacks for each genomic
+  # region. Keep the same batch boundaries (including the final partial batch)
+  # so the backend evaluates the same tensor shapes as Model.predict.
+  if len(examples) <= batch_size:
+    return classifier.predict_on_batch(examples)
+  return np.concatenate([
+      classifier.predict_on_batch(examples[start : start + batch_size])
+      for start in range(0, len(examples), batch_size)
+  ])
 
 
 class SmallModelVariantCaller:

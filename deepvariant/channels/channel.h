@@ -69,7 +69,10 @@ class Channel {
   int width_;
 
  protected:
-  learning::genomics::deepvariant::PileupImageOptions options_;
+  // Channels are short-lived objects created for each read, so they refer to
+  // the caller's options rather than copying them. The options must outlive
+  // the channel.
+  const learning::genomics::deepvariant::PileupImageOptions& options_;
 
   // The maximum value a pixel can have as a float. We use the 254.0
   // value as originally set in DeepVariant v1. This means our pixel

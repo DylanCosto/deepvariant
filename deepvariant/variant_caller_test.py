@@ -303,6 +303,27 @@ class VariantCallerTests(parameterized.TestCase):
     allele_counter = self.fake_allele_counter(100, [(0, 0, ref)])
     self.assertEmpty(list(caller.make_gvcfs(allele_counter.summary_counts())))
 
+  @parameterized.parameters(
+      ([0.0, -1.0, -2.0], [0, 0]),
+      ([0.0, 0.0, 0.0], [0, 0]),
+      ([-1.0, 0.0, -2.0], [-1, -1]),
+      ([-1.0, -2.0, 0.0], [-1, -1]),
+      ([np.nan, 0.0, 0.0], [-1, -1]),
+      ([0.0, np.nan, 0.0], [-1, -1]),
+      ([0.0, 0.0, np.nan], [-1, -1]),
+      ([np.inf, 0.0, 0.0], [0, 0]),
+      ([-np.inf, -np.inf, -np.inf], [0, 0]),
+  )
+  def test_gvcf_reference_likelihood_comparison(self, likelihoods, genotype):
+    caller = PlaceholderVariantCaller(0.01, 100)
+    allele_counter = self.fake_allele_counter(100, [(0, 10, 'A')])
+    with mock.patch.object(
+        caller, 'reference_confidence', return_value=(50, np.array(likelihoods))
+    ):
+      records = list(caller.make_gvcfs(allele_counter.summary_counts()))
+    self.assertLen(records, 1)
+    self.assertEqual(list(records[0].calls[0].genotype), genotype)
+
   @parameterized.parameters('X', '>', '!')
   def test_gvcf_basic_raises_with_bad_ref_base(self, ref):
     caller = PlaceholderVariantCaller(0.01, 100)
@@ -401,6 +422,112 @@ class VariantCallerTests(parameterized.TestCase):
     self.assertLen(gvcfs, len(expecteds))
     for actual, expected in zip(gvcfs, expecteds):
       self.assertGVCF(actual, **expected)
+
+  @parameterized.parameters(
+      sorted(
+          variant_caller.EXTENDED_IUPAC_CODES
+          - variant_caller.CANONICAL_DNA_BASES
+      )
+  )
+  def test_ambiguous_reference_breaks_block(self, ambiguous_base):
+    caller = PlaceholderVariantCaller(0.01, 50)
+    counts = [(0, 30, 'A'), (0, 30, ambiguous_base), (0, 30, 'C')]
+    summaries = self.fake_allele_counter(100, counts).summary_counts()
+    records = list(caller.make_gvcfs(iter(summaries)))
+    self.assertEqual(
+        [(v.start, v.end) for v in records], [(100, 101), (102, 103)]
+    )
+
+  @parameterized.product(
+      include_med_dp=[False, True], use_cache_table=[False, True]
+  )
+  def test_tied_gq_retains_first_likelihoods(
+      self, include_med_dp, use_cache_table
+  ):
+    caller = PlaceholderVariantCaller(0.01, 50, use_cache_table=use_cache_table)
+    summaries = self.fake_allele_counter(
+        100, [(0, 30, 'A'), (0, 20, 'C'), (0, 25, 'G')]
+    ).summary_counts()
+    records = list(caller.make_gvcfs(iter(summaries), include_med_dp))
+    self.assertLen(records, 1)
+    self.assertGVCF(
+        records[0],
+        ref='A',
+        start=100,
+        end=103,
+        gq=50,
+        min_dp=20,
+        gls=caller.reference_confidence(30, 30)[1],
+        med_dp=25 if include_med_dp else None,
+    )
+
+  @parameterized.parameters(False, True)
+  def test_same_counts_across_par_boundary(self, use_cache_table):
+    caller = PlaceholderVariantCaller(0.01, 50, use_cache_table=use_cache_table)
+    caller.options.haploid_contigs.append('chr1')
+    caller.options.par_regions_bed = 'par.bed'
+    summaries = self.fake_allele_counter(
+        100, [(4, 6, 'A')] * 3
+    ).summary_counts()
+    par_regions = mock.Mock()
+    par_regions.overlaps.side_effect = lambda chrom, pos: pos == 101
+    with mock.patch.object(
+        variant_caller.ranges.RangeSet, 'from_bed', return_value=par_regions
+    ):
+      records = list(caller.make_gvcfs(summaries))
+    self.assertLen(records, 3)
+    for i, record in enumerate(records):
+      haploid = i != 1
+      gq, likelihoods = caller.reference_confidence(6, 10, haploid)
+      self.assertGVCF(
+          record,
+          ref='A',
+          start=100 + i,
+          end=101 + i,
+          gq=gq,
+          min_dp=10,
+          gls=likelihoods,
+          gts=[0, 0] if haploid else [-1, -1],
+      )
+
+  def test_options_can_change_between_gvcf_calls(self):
+    caller = PlaceholderVariantCaller(0.01, 100, gq_resolution=1)
+    summaries = self.fake_allele_counter(
+        100, [(0, 18, 'A'), (0, 19, 'C')]
+    ).summary_counts()
+    self.assertLen(list(caller.make_gvcfs(summaries)), 2)
+    caller.options.gq_resolution = 10
+    records = list(caller.make_gvcfs(summaries))
+    self.assertLen(records, 1)
+    self.assertGVCF(records[0], ref='A', start=100, end=102, gq=53, min_dp=18)
+
+  @parameterized.product(
+      include_med_dp=[False, True], use_cache_table=[False, True]
+  )
+  def test_high_coverage_retains_unscaled_depth(
+      self, include_med_dp, use_cache_table
+  ):
+    caller = PlaceholderVariantCaller(0.01, 50, use_cache_table=use_cache_table)
+    summaries = self.fake_allele_counter(
+        100, [(0, 2000, 'A'), (0, 1000, 'C')]
+    ).summary_counts()
+    records = list(caller.make_gvcfs(summaries, include_med_dp))
+    self.assertLen(records, 1)
+    self.assertGVCF(
+        records[0],
+        ref='A',
+        start=100,
+        end=102,
+        gq=50,
+        min_dp=1000,
+        gls=caller.reference_confidence(2000, 2000)[1],
+        med_dp=1500 if include_med_dp else None,
+    )
+
+  @parameterized.parameters(False, True)
+  def test_empty_gvcf_input(self, include_med_dp):
+    caller = PlaceholderVariantCaller(0.01, 50)
+    self.assertEmpty(list(caller.make_gvcfs(iter(()), include_med_dp)))
 
   @parameterized.parameters(
       dict(

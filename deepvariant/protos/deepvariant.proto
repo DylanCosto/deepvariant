@@ -1073,6 +1073,10 @@ message MakeExamplesOptions {
   // If filtering low VAF candidates, only filter if average mapping
   // quality is less than this value.
   int32 low_vaf_max_mapping_quality = 101;
+
+  // Gzip compression level for output examples: -1 for the zlib default, or 0
+  // through 9. If unset, CALLING mode uses 1 and other modes use -1.
+  optional int32 examples_compression_level = 102;
 }
 
 // Config describe information needed for a dataset that can be used for

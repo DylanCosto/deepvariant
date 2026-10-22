@@ -257,6 +257,49 @@ BASE_FEATURE_VALUES_SAMPLE_2 = [1, 1, 2, 6, 16, 50, 0, 0, 0, 0, 0, 0]
 
 class SmallModelMakeExamplesTest(parameterized.TestCase):
 
+  @parameterized.product(
+      sample=[None, MAIN_SAMPLE, "missing_sample"],
+      haplotype=[None, 0, 1, 2],
+  )
+  def test_bulk_base_features_match_individual_features(
+      self, sample, haplotype
+  ):
+    encoder = make_small_model_examples.FeatureEncoder(
+        FAKE_VARIANT_CALL_HET,
+        (0,),
+        sample,
+        haplotype,
+        {"read_1": 1, "read_2": 2},
+    )
+    expected = {
+        feature.value: encoder.encode_base_feature(feature)
+        for feature in make_small_model_examples.BaseFeature
+    }
+    actual = encoder.encode_base_features()
+    self.assertEqual(actual, expected)
+    self.assertEqual(list(actual), list(expected))
+
+  def test_selected_features_keep_encoder_order(self):
+    factory = make_small_model_examples.SmallModelExampleFactory(
+        vaf_context_window_size=3,
+        sample_names=[MAIN_SAMPLE],
+        model_features=["alt_base_quality", "num_reads_supports_ref"],
+    )
+    encoder = make_small_model_examples.FeatureEncoder(
+        FAKE_VARIANT_CALL_HET, (0,)
+    )
+    expected = [
+        encoder.encode_base_feature(feature)
+        for feature in (
+            make_small_model_examples.BaseFeature.NUM_READS_SUPPORTS_REF,
+            make_small_model_examples.BaseFeature.ALT_BASE_QUALITY,
+        )
+    ]
+    actual = factory.encode_inference_examples(
+        [FAKE_VARIANT_CALL_HET], {}, [0]
+    ).inference_examples
+    self.assertEqual(actual, [expected])
+
   @parameterized.named_parameters(
       dict(
           testcase_name="contig_feature",

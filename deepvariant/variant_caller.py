@@ -29,10 +29,8 @@
 """A VariantCaller producing DeepVariantCall and gVCF records."""
 
 import abc
-import collections
-import itertools
+import functools
 import math
-import operator
 import statistics
 from typing import Dict, Sequence, Tuple
 
@@ -54,19 +52,6 @@ CANONICAL_DNA_BASES = frozenset('ACGT')
 
 # Possible DNA base codes seen in a reference genome.
 EXTENDED_IUPAC_CODES = frozenset('ACGTRYSWKMBDHVN')
-
-# Data collection class used in creation of gVCF records.
-_GVCF = collections.namedtuple(
-    '_GVCF',
-    [
-        'summary_counts',
-        'quantized_gq',
-        'raw_gq',
-        'likelihoods',
-        'read_depth',
-        'has_valid_gl',
-    ],
-)
 
 LOG_10 = math.log(10.0)
 
@@ -287,130 +272,117 @@ class VariantCaller(metaclass=abc.ABCMeta):
           self.options.par_regions_bed, enable_logging=False
       )
 
-    def with_gq_and_likelihoods(summary_counts):
-      """Returns summary_counts along with GQ and genotype likelihoods.
+    haploid_contigs = frozenset(self.options.haploid_contigs)
+    gq_resolution = self.options.gq_resolution
 
-      If the reference base is not in CANONICAL_DNA_BASES, both GQ and genotype
-      likelihoods are set to None.
+    # Nearby positions frequently have identical read counts. Cache both the
+    # confidence lookup and its derived block metadata, keeping the cache local
+    # so callers can change options between regions. Bound its size even for
+    # unusually high or variable coverage.
+    @functools.lru_cache(maxsize=512)
+    def confidence(n_ref, n_total, is_haploid):
+      raw_gq, likelihoods = self.reference_confidence(
+          n_ref, n_total, is_haploid
+      )
+      quantized_gq = _quantize_gq(raw_gq, gq_resolution)
+      has_valid_gl = (
+          likelihoods[0] >= likelihoods[1] and likelihoods[0] >= likelihoods[2]
+      )
+      return quantized_gq, raw_gq, likelihoods, has_valid_gl
 
-      Args:
-        summary_counts: A single AlleleCountSummary.
-
-      Returns:
-        A tuple of summary_counts, quantized GQ, raw GQ, and genotype
-        likelihoods for summary_counts where raw GQ and genotype_likelihood are
-        calculated by self.reference_confidence.
-
-      Raises:
-        ValueError: The reference base is not a valid DNA or IUPAC base.
-      """
-      if summary_counts.ref_base not in CANONICAL_DNA_BASES:
-        if summary_counts.ref_base in EXTENDED_IUPAC_CODES:
-          # Skip calculating gq and likelihoods, since this is an ambiguous
-          # reference base.
-          quantized_gq, raw_gq, likelihoods = None, None, None
-          has_valid_gl = True
-          n_total = summary_counts.total_read_count
-        else:
-          raise ValueError(
-              'Invalid reference base={} found during gvcf calculation'.format(
-                  summary_counts.ref_base
-              )
-          )
-      else:
-        n_ref = summary_counts.ref_supporting_read_count
-        n_total = summary_counts.total_read_count
-        is_haploid = (
-            summary_counts.reference_name in self.options.haploid_contigs
-            and not (
-                par_regions
-                and par_regions.overlaps(
-                    summary_counts.reference_name, summary_counts.position
-                )
-            )
-        )
-        raw_gq, likelihoods = self.reference_confidence(
-            n_ref, n_total, is_haploid
-        )
-        quantized_gq = _quantize_gq(raw_gq, self.options.gq_resolution)
-        has_valid_gl = np.amax(likelihoods) == likelihoods[0]
-      return _GVCF(
-          summary_counts=summary_counts,
-          quantized_gq=quantized_gq,
-          raw_gq=raw_gq,
-          likelihoods=likelihoods,
-          read_depth=n_total,
-          has_valid_gl=has_valid_gl,
+    def make_gvcf(
+        first, last, raw_gq, likelihoods, min_dp, depths, called=True
+    ):
+      call = variants_pb2.VariantCall(
+          call_set_name=self.options.sample_name,
+          genotype=[0, 0] if called else [-1, -1],
+          genotype_likelihood=likelihoods,
+      )
+      variantcall_utils.set_gq(call, raw_gq)
+      variantcall_utils.set_min_dp(call, min_dp)
+      if include_med_dp:
+        med_dp = int(statistics.median(depths)) if called else min_dp
+        variantcall_utils.set_med_dp(call, med_dp)
+      return variants_pb2.Variant(
+          reference_name=first.reference_name,
+          reference_bases=first.ref_base,
+          alternate_bases=[vcf_constants.GVCF_ALT_ALLELE],
+          start=first.position,
+          end=last.position + 1,
+          calls=[call],
       )
 
-    # Combines contiguous, compatible single-bp blocks into larger gVCF blocks,
-    # respecting non-reference variants interspersed among them. Yields each
-    # combined gVCF Variant proto, in order. Compatible right now means that the
-    # blocks to be merged have the same non-None GQ value.
-    for key, combinable in itertools.groupby(
-        (with_gq_and_likelihoods(sc) for sc in allele_count_summaries),
-        key=operator.attrgetter('quantized_gq', 'has_valid_gl'),
-    ):
-      quantized_gq_val, gl_is_valid = key
-      if quantized_gq_val is None:
-        # A None key indicates that a non-DNA reference base was encountered, so
-        # skip this group.
+    # Aggregate each block in one pass, without allocating a record for every
+    # reference base. Only retain per-base depths when MED_DP is requested.
+    first_record = None
+    for summary_counts in allele_count_summaries:
+      ref_base = summary_counts.ref_base
+      if ref_base in CANONICAL_DNA_BASES:
+        n_total = summary_counts.total_read_count
+        is_haploid = False
+        if haploid_contigs and summary_counts.reference_name in haploid_contigs:
+          is_haploid = not (
+              par_regions
+              and par_regions.overlaps(
+                  summary_counts.reference_name, summary_counts.position
+              )
+          )
+        quantized_gq, raw_gq, likelihoods, has_valid_gl = confidence(
+            summary_counts.ref_supporting_read_count, n_total, is_haploid
+        )
+      elif ref_base in EXTENDED_IUPAC_CODES:
+        # An ambiguous reference base ends the preceding block and is skipped.
+        quantized_gq, has_valid_gl = None, True
+      else:
+        raise ValueError(
+            'Invalid reference base={} found during gvcf calculation'.format(
+                ref_base
+            )
+        )
+
+      if first_record is not None and (
+          quantized_gq != block_gq or not has_valid_gl
+      ):
+        yield make_gvcf(
+            first_record, last_record, min_gq, min_likelihoods, min_dp, depths
+        )
+        first_record = None
+
+      if quantized_gq is None:
+        continue
+      if not has_valid_gl:
+        # Sites whose hom-ref likelihood is not maximal remain separate ./.
+        # records, even when adjacent sites have the same GQ.
+        yield make_gvcf(
+            summary_counts,
+            summary_counts,
+            raw_gq,
+            likelihoods,
+            n_total,
+            None,
+            called=False,
+        )
         continue
 
-      if gl_is_valid:
-        combinable = list(combinable)
-        # min_gq_record is a tuple where first element is the index of the
-        # element with the lowest raw_gq value, second element is the min
-        # raw_gq value.
-        min_gq_record = min(
-            enumerate(elt.raw_gq for elt in combinable), key=lambda p: p[1]
-        )
-        min_gq = min_gq_record[1]
-        min_dp = min(elt.read_depth for elt in combinable)
-        med_dp = int(statistics.median(elt.read_depth for elt in combinable))
-        first_record, last_record = combinable[0], combinable[-1]
-        call = variants_pb2.VariantCall(
-            call_set_name=self.options.sample_name,
-            genotype=[0, 0],
-            genotype_likelihood=combinable[min_gq_record[0]].likelihoods,
-        )
-        variantcall_utils.set_gq(call, min_gq)
-        variantcall_utils.set_min_dp(call, min_dp)
-        if include_med_dp:
-          variantcall_utils.set_med_dp(call, med_dp)
-        yield variants_pb2.Variant(
-            reference_name=first_record.summary_counts.reference_name,
-            reference_bases=first_record.summary_counts.ref_base,
-            alternate_bases=[vcf_constants.GVCF_ALT_ALLELE],
-            start=first_record.summary_counts.position,
-            end=last_record.summary_counts.position + 1,
-            calls=[call],
-        )
+      if first_record is None:
+        first_record = summary_counts
+        block_gq = quantized_gq
+        min_gq, min_likelihoods, min_dp = raw_gq, likelihoods, n_total
+        depths = [] if include_med_dp else None
       else:
-        # After evaluating the effect of including sites with contradictory GL
-        # (where the value for hom_ref is not maximal), we concluded that
-        # un-calling these sites (by setting its genotype "./.") is better
-        # for cohort merging.
-        # See internal for detail.
-        for elt in combinable:
-          uncalled_gt = [-1, -1]
-          call = variants_pb2.VariantCall(
-              call_set_name=self.options.sample_name,
-              genotype=uncalled_gt,
-              genotype_likelihood=elt.likelihoods,
-          )
-          variantcall_utils.set_gq(call, elt.raw_gq)
-          variantcall_utils.set_min_dp(call, elt.read_depth)
-          if include_med_dp:
-            variantcall_utils.set_med_dp(call, elt.read_depth)
-          yield variants_pb2.Variant(
-              reference_name=elt.summary_counts.reference_name,
-              reference_bases=elt.summary_counts.ref_base,
-              alternate_bases=[vcf_constants.GVCF_ALT_ALLELE],
-              start=elt.summary_counts.position,
-              end=elt.summary_counts.position + 1,
-              calls=[call],
-          )
+        # Preserve the first record's likelihoods when raw GQs are tied.
+        if raw_gq < min_gq:
+          min_gq, min_likelihoods = raw_gq, likelihoods
+        if n_total < min_dp:
+          min_dp = n_total
+      last_record = summary_counts
+      if include_med_dp:
+        depths.append(n_total)
+
+    if first_record is not None:
+      yield make_gvcf(
+          first_record, last_record, min_gq, min_likelihoods, min_dp, depths
+      )
 
   def calls_and_gvcfs(
       self,

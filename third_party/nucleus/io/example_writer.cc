@@ -88,7 +88,7 @@ class ExampleWriter::Impl {
 
 class ExampleWriter::TfRecordImpl : public ExampleWriter::Impl {
  public:
-  explicit TfRecordImpl(absl::string_view path) {
+  explicit TfRecordImpl(absl::string_view path, int compression_level) {
     UpdateStatus(tensorflow::Env::Default()->NewWritableFile(std::string(path),
                                                              &tf_file_));
     if (ABSL_PREDICT_FALSE(!status().ok())) {
@@ -96,9 +96,9 @@ class ExampleWriter::TfRecordImpl : public ExampleWriter::Impl {
       return;
     }
 
-    const tensorflow::io::RecordWriterOptions& options =
-        tensorflow::io::RecordWriterOptions::CreateRecordWriterOptions(
-            "GZIP");
+    tensorflow::io::RecordWriterOptions options =
+        tensorflow::io::RecordWriterOptions::CreateRecordWriterOptions("GZIP");
+    options.zlib_options.compression_level = compression_level;
 
     tf_ = std::make_unique<tensorflow::io::RecordWriter>(
             tf_file_.get(),
@@ -127,8 +127,13 @@ class ExampleWriter::TfRecordImpl : public ExampleWriter::Impl {
 };
 
 
-ExampleWriter::ExampleWriter(absl::string_view path,
-                             ExampleFormat format) {
+ExampleWriter::ExampleWriter(absl::string_view path, ExampleFormat format,
+                             int compression_level) {
+  if (compression_level < -1 || compression_level > 9) {
+    status_ =
+        absl::InvalidArgumentError("gzip compression level must be -1..9");
+    return;
+  }
   std::filesystem::path p = std::filesystem::path(path);
   if (!std::filesystem::is_directory(p.parent_path())
       && p.parent_path() != "") {
@@ -143,7 +148,7 @@ ExampleWriter::ExampleWriter(absl::string_view path,
       return;
     case ExampleFormat::kTfRecord:
       LOG(INFO) << "Writing output using TfRecord";
-      impl_ = std::make_unique<TfRecordImpl>(path);
+      impl_ = std::make_unique<TfRecordImpl>(path, compression_level);
       break;
     case ExampleFormat::kBagz:
       break;

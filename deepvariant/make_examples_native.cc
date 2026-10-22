@@ -148,8 +148,9 @@ ExamplesGenerator::ExamplesGenerator(
         LOG(INFO) << "Example filename not found for role: " << role;
         continue;
       }
-      sample.writer =
-          std::make_unique<nucleus::ExampleWriter>(it->second);
+      sample.writer = std::make_unique<nucleus::ExampleWriter>(
+          it->second, nucleus::ExampleFormat::kAuto,
+          ExamplesCompressionLevel(options_));
       if (!sample.writer->status().ok()) {
         LOG(FATAL) << "Failed to create Example writer for " << it->second;
       }
@@ -168,6 +169,13 @@ ExamplesGenerator::~ExamplesGenerator() {
       }
     }
   }
+}
+
+int ExamplesCompressionLevel(const MakeExamplesOptions& options) {
+  if (options.has_examples_compression_level()) {
+    return options.examples_compression_level();
+  }
+  return options.mode() == MakeExamplesOptions::CALLING ? 1 : -1;
 }
 
 std::string GetExamplesFilename(const MakeExamplesOptions& options,

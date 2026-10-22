@@ -29,6 +29,7 @@
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
 import tensorflow as tf
 from deepvariant.protos import deepvariant_pb2
 from deepvariant.small_model import inference
@@ -85,7 +86,7 @@ class SmallModelVariantCallerTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     self.mock_classifier = mock.MagicMock()
-    self.mock_classifier.predict.return_value = [
+    self.mock_classifier.predict_on_batch.return_value = [
         (0.0, 0.999, 0.0),
         (0.0, 0.0, 0.1),
         (0.0, 0.0, 0.999),
@@ -96,6 +97,43 @@ class SmallModelVariantCallerTest(parameterized.TestCase):
         snp_gq_threshold=10,
         indel_gq_threshold=10,
         batch_size=4,
+    )
+
+  @parameterized.parameters((1, 4), (4, 4), (5, 4), (8, 4), (9, 4))
+  def test_classify_preserves_predict_results(self, num_examples, batch_size):
+    model = inference.keras.Sequential([
+        inference.keras.layers.Input(shape=(4,)),
+        inference.keras.layers.Dense(
+            8,
+            activation="relu",
+            kernel_initializer=inference.keras.initializers.Constant(0.125),
+        ),
+        inference.keras.layers.Dense(
+            3,
+            activation="softmax",
+            kernel_initializer=inference.keras.initializers.Constant(
+                np.arange(24, dtype=np.float32).reshape(8, 3) / 32
+            ),
+        ),
+    ])
+    examples = np.arange(num_examples * 4).reshape(num_examples, 4)
+    expected = model.predict(examples, batch_size=batch_size, verbose=0)
+    np.testing.assert_array_equal(
+        inference.classify(model, examples, batch_size), expected
+    )
+
+  def test_classify_preserves_batch_boundaries_and_order(self):
+    classifier = mock.Mock()
+    classifier.predict_on_batch.side_effect = lambda values: values[:, :3]
+    examples = np.arange(44).reshape(11, 4)
+    actual = inference.classify(classifier, examples, batch_size=4)
+    np.testing.assert_array_equal(actual, examples[:, :3])
+    self.assertEqual(
+        [
+            len(call.args[0])
+            for call in classifier.predict_on_batch.call_args_list
+        ],
+        [4, 4, 3],
     )
 
   def test_call_variants(self):
