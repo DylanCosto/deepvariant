@@ -586,14 +586,6 @@ SelectAltAllelesResult
 // IsGoodAltAllele().
 SelectAltAllelesResult VariantCaller::SelectAltAlleles(
     const SelectAltAllelesInputOptions& options) const {
-  SelectAltAllelesResult output_options;
-  // allele_counts_mod is initialized to be the same as allele_counts. If
-  // complex variants are enabled then allele_counts_mod will be modified.
-  for (const auto& [sample_name, allele_count] :
-           options.allele_counts_by_sample) {
-      output_options.allele_counts_mod.insert({sample_name, allele_count});
-  }
-
   // allele_counts.at will throw an exception if key is not found.
   // Absent target_sample is a critical error.
   auto it = options.allele_counts_by_sample.find(target_sample_);
